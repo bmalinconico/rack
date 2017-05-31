@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -195,8 +194,11 @@ func (p *AWSProvider) BuildExport(app, id string, w io.Writer) error {
 	defer os.Remove(tmp)
 
 	for service := range m.Services {
+		r, w := io.Pipe()
+		errch := make(chan error)
+
 		image := fmt.Sprintf("%s:%s.%s", repo.URI, service, build.Id)
-		file := filepath.Join(tmp, fmt.Sprintf("%s.%s.tar", service, build.Id))
+		//file := filepath.Join(tmp, fmt.Sprintf("%s.%s.tar", service, build.Id))
 
 		log.Step("pull").Logf("image=%q", image)
 		out, err := exec.Command("docker", "pull", image).CombinedOutput()
@@ -204,23 +206,37 @@ func (p *AWSProvider) BuildExport(app, id string, w io.Writer) error {
 			return log.Error(fmt.Errorf("%s: %s\n", lastline(out), err.Error()))
 		}
 
-		log.Step("save").Logf("image=%q file=%q", image, file)
-		out, err = exec.Command("docker", "save", "-o", file, image).CombinedOutput()
-		if err != nil {
-			return log.Error(fmt.Errorf("%s: %s\n", lastline(out), err.Error()))
-		}
+		go func() {
+			defer w.Close()
 
-		stat, err := os.Stat(file)
-		if err != nil {
-			log.Error(err)
-			return err
-		}
+			log.Step("save").Logf("image=%q", image)
+			cmd := exec.Command("docker", "save", image)
+			cmd.Stdout = w
+
+			if err := cmd.Start(); err != nil {
+				errch <- err
+				return
+			}
+
+			if err := cmd.Wait(); err != nil {
+				errch <- err
+				return
+			}
+
+			errch <- nil
+		}()
+
+		//stat, err := os.Stat(file)
+		//if err != nil {
+		//	log.Error(err)
+		//	return err
+		//}
 
 		header := &tar.Header{
 			Typeflag: tar.TypeReg,
 			Name:     fmt.Sprintf("%s.%s.tar", service, build.Id),
 			Mode:     0600,
-			Size:     stat.Size(),
+			//Size:     stat.Size(),
 		}
 
 		if err := tw.WriteHeader(header); err != nil {
@@ -228,22 +244,35 @@ func (p *AWSProvider) BuildExport(app, id string, w io.Writer) error {
 			return err
 		}
 
-		fd, err := os.Open(file)
-		if err != nil {
+		//fd, err := os.Open(file)
+		//if err != nil {
+		//	log.Error(err)
+		//	return err
+		//}
+
+		go func() {
+			log.Step("copy").Logf("image=%q", image)
+			if _, err := io.Copy(tw, r); err != nil {
+				errch <- err
+			}
+
+			errch <- nil
+		}()
+
+		if err := <-errch; err != nil {
 			log.Error(err)
 			return err
 		}
 
-		log.Step("copy").Logf("file=%q", file)
-		if _, err := io.Copy(tw, fd); err != nil {
+		if err := <-errch; err != nil {
 			log.Error(err)
 			return err
 		}
 
-		if err := os.Remove(file); err != nil {
-			log.Error(err)
-			return err
-		}
+		//if err := os.Remove(file); err != nil {
+		//	log.Error(err)
+		//	return err
+		//}
 	}
 
 	if err := tw.Close(); err != nil {
