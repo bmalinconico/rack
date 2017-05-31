@@ -8,10 +8,13 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/docker/go-units"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -654,4 +657,18 @@ func (p *AWSProvider) updateStack(name string, template string, changes map[stri
 	cache.Clear("describeStacks", name)
 
 	return err
+}
+
+func imageSize(image string) (int64, error) {
+	out, err := exec.Command("docker", "images", "--format", "{{.Size}}", image).CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("image size %s %s", err, strings.TrimSpace(string(out)))
+	}
+
+	size, err := units.FromHumanSize(string(out))
+	if err != nil {
+		return 0, err
+	}
+
+	return size, nil
 }

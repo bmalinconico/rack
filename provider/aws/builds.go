@@ -232,11 +232,16 @@ func (p *AWSProvider) BuildExport(app, id string, w io.Writer) error {
 		//	return err
 		//}
 
+		size, err := imageSize(image)
+		if err != nil {
+			return err
+		}
+
 		header := &tar.Header{
 			Typeflag: tar.TypeReg,
 			Name:     fmt.Sprintf("%s.%s.tar", service, build.Id),
 			Mode:     0600,
-			//Size:     stat.Size(),
+			Size:     size,
 		}
 
 		if err := tw.WriteHeader(header); err != nil {
