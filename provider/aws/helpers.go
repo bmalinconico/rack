@@ -665,7 +665,7 @@ func imageSize(image string) (int64, error) {
 		return 0, fmt.Errorf("image size %s %s", err, strings.TrimSpace(string(out)))
 	}
 
-	size, err := units.FromHumanSize(string(out))
+	size, err := units.FromHumanSize(strings.TrimSpace(string(out)))
 	if err != nil {
 		return 0, err
 	}
