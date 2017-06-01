@@ -1,10 +1,13 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -12,6 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/convox/rack/api/cmd/build/source"
 	"github.com/convox/rack/api/structs"
 	"github.com/convox/rack/manifest"
@@ -97,6 +103,10 @@ func main() {
 		fail(err)
 	}
 
+	if err := export(); err != nil {
+		fail(err)
+	}
+
 	if err := success(); err != nil {
 		fail(err)
 	}
@@ -140,6 +150,184 @@ func execute() error {
 	}
 
 	return nil
+}
+
+func export() error {
+	r, w := io.Pipe()
+
+	errch := make(chan error)
+
+	go createArtifact(w, errch)
+	go uploadArtifact(r, errch)
+
+	if err := <-errch; err != nil {
+		return err
+	}
+
+	if err := <-errch; err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func createArtifact(w io.WriteCloser, errch chan error) {
+	defer w.Close()
+
+	b, err := currentProvider.BuildGet(flagApp, flagID)
+	if err != nil {
+		errch <- err
+		return
+	}
+
+	currentBuild = b
+
+	m, err := manifest.Load([]byte(currentBuild.Manifest))
+	if err != nil {
+		errch <- fmt.Errorf("manifest error: %s", err)
+		return
+	}
+
+	if len(m.Services) < 1 {
+		errch <- fmt.Errorf("no services found to export")
+		return
+	}
+
+	bjson, err := json.MarshalIndent(currentBuild, "", "  ")
+	if err != nil {
+		errch <- err
+		return
+	}
+
+	tmp, err := ioutil.TempDir("", "")
+	if err != nil {
+		errch <- err
+		return
+	}
+
+	defer os.Remove(tmp)
+
+	pullch := make(chan error, len(m.Services))
+
+	for service := range m.Services {
+		go func() {
+			image := fmt.Sprintf("%s/%s:latest", flagApp, service)
+			file := filepath.Join(tmp, fmt.Sprintf("%s.%s.tar", service, currentBuild.Id))
+
+			out, err := exec.Command("docker", "save", "-o", file, image).CombinedOutput()
+			if err != nil {
+				pullch <- fmt.Errorf("%s: %s\n", strings.TrimSpace(string(out)), err.Error())
+			}
+
+			pullch <- nil
+		}()
+	}
+
+	for i := 0; i < len(m.Services); i++ {
+		if err := <-pullch; err != nil {
+			errch <- err
+			return
+		}
+	}
+
+	gz := gzip.NewWriter(w)
+	tw := tar.NewWriter(gz)
+
+	dataHeader := &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "build.json",
+		Mode:     0600,
+		Size:     int64(len(bjson)),
+	}
+
+	if err := tw.WriteHeader(dataHeader); err != nil {
+		errch <- err
+		return
+	}
+
+	if _, err := tw.Write(bjson); err != nil {
+		errch <- err
+		return
+	}
+
+	for service := range m.Services {
+		file := filepath.Join(tmp, fmt.Sprintf("%s.%s.tar", service, currentBuild.Id))
+
+		stat, err := os.Stat(file)
+		if err != nil {
+			errch <- err
+			return
+		}
+
+		header := &tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     fmt.Sprintf("%s.%s.tar", service, currentBuild.Id),
+			Mode:     0600,
+			Size:     stat.Size(),
+		}
+
+		if err := tw.WriteHeader(header); err != nil {
+			errch <- err
+			return
+		}
+
+		fd, err := os.Open(file)
+		if err != nil {
+			errch <- err
+			return
+		}
+
+		if _, err := io.Copy(tw, fd); err != nil {
+			errch <- err
+			return
+		}
+
+		if err := os.Remove(file); err != nil {
+			errch <- err
+			return
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		errch <- err
+		return
+	}
+
+	if err := gz.Close(); err != nil {
+		errch <- err
+		return
+	}
+
+	errch <- nil
+}
+
+func uploadArtifact(r io.Reader, errch chan error) {
+	a, err := currentProvider.AppGet(flagApp)
+	if err != nil {
+		errch <- err
+		return
+	}
+
+	ss, err := session.NewSession()
+	if err != nil {
+		errch <- err
+		return
+	}
+
+	uploader := s3manager.NewUploader(ss)
+	ui := &s3manager.UploadInput{
+		Bucket: aws.String(a.Outputs["Settings"]),
+		Key:    aws.String(fmt.Sprintf("exports/%s.tgz", flagID)),
+		Body:   r,
+	}
+
+	_, err = uploader.Upload(ui)
+	if err != nil {
+		errch <- err
+		return
+	}
+
+	errch <- nil
 }
 
 func fetch() (string, error) {
