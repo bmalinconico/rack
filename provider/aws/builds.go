@@ -236,8 +236,7 @@ func (p *AWSProvider) BuildExport(app, id string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-
-		fmt.Printf("size = %+v\n", size)
+		log.Step("size").Logf("size=%q", size)
 
 		header := &tar.Header{
 			Typeflag: tar.TypeReg,
