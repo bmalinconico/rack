@@ -237,6 +237,8 @@ func (p *AWSProvider) BuildExport(app, id string, w io.Writer) error {
 			return err
 		}
 
+		fmt.Printf("size = %+v\n", size)
+
 		header := &tar.Header{
 			Typeflag: tar.TypeReg,
 			Name:     fmt.Sprintf("%s.%s.tar", service, build.Id),
